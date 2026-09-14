@@ -1,3 +1,20 @@
+* v_5.1.7 更新
+
+	* **安全修复**
+		* 修复网页可通过 intent URL 拉起宿主应用未导出（`exported="false"`）页面的问题（Intent Redirection）。
+		  此前网页中的 `intent://...;component=...;end`（或任意 scheme 附带 `#Intent;...;end` 片段）会被原样解析并以宿主身份启动，
+		  可越过组件的导出限制，并携带任意 extras。影响 5.1.6-androidx 及更早版本，建议升级
+			* 网页指定的组件若属于宿主自身，将被忽略，只能命中宿主声明过 intent-filter 的页面
+			* 宿主未导出的页面在任何 `OpenOtherPageWays` 模式下都不会被打开
+			* 清除网页传入的 selector、嵌套 Intent 与 URI 权限授予类 flags
+		* 网页能打开的宿主页面，不会超出外部应用能打开的范围。如需让 H5 打开未导出页面，请通过 JSBridge 由原生代码发起
+	* **行为变更**
+		* `intent://` 链接现在与其他 scheme 一样受 `OpenOtherPageWays` 控制：
+		  默认 `ASK` 模式下，跳转其他应用前会先弹窗询问；`DISALLOW` 模式下不再打开。
+		  跳转宿主自身已导出的页面仍直接打开。如需保持直接跳转，请设置 `setOpenOtherPageWays(DefaultWebClient.OpenOtherPageWays.DERECT)`
+	* **功能修复**
+		* 修复询问弹窗复用导致的问题：连续点击不同链接时，确认后打开的始终是第一次点击的链接
+
 * v_5.1.6 更新（自 v5.1.1 起的累计更新）
 
 	> 5.1.2 ~ 5.1.5 因发布链路存在问题（产物中缺少 AAR、JitPack 构建失败）未能实际发布，

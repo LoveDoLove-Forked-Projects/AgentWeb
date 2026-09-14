@@ -60,6 +60,7 @@ public class DefaultUIController extends AbsAgentWebUIController {
 	private Activity mActivity;
 	private WebParentLayout mWebParentLayout;
 	private AlertDialog mAskOpenOtherAppDialog = null;
+	private Handler.Callback mAskOpenOtherAppCallback = null;
 	private AlertDialog mSslErrorDialog = null;
 	private ProgressDialog mProgressDialog;
 	private Resources mResources = null;
@@ -81,6 +82,8 @@ public class DefaultUIController extends AbsAgentWebUIController {
 				return;
 			}
 		}
+		// 弹窗会被复用，按钮必须回调本次的 callback，否则确认后打开的仍是第一次弹窗对应的链接
+		mAskOpenOtherAppCallback = callback;
 		if (mAskOpenOtherAppDialog == null) {
 			mAskOpenOtherAppDialog = new AlertDialog
 					.Builder(mActivity)
@@ -90,16 +93,16 @@ public class DefaultUIController extends AbsAgentWebUIController {
 					.setNegativeButton(android.R.string.cancel, new DialogInterface.OnClickListener() {
 						@Override
 						public void onClick(DialogInterface dialog, int which) {
-							if (callback != null) {
-								callback.handleMessage(Message.obtain(null, -1));
+							if (mAskOpenOtherAppCallback != null) {
+								mAskOpenOtherAppCallback.handleMessage(Message.obtain(null, -1));
 							}
 						}
 					})//
 					.setPositiveButton(mResources.getString(R.string.agentweb_leave), new DialogInterface.OnClickListener() {
 						@Override
 						public void onClick(DialogInterface dialog, int which) {
-							if (callback != null) {
-								callback.handleMessage(Message.obtain(null, 1));
+							if (mAskOpenOtherAppCallback != null) {
+								mAskOpenOtherAppCallback.handleMessage(Message.obtain(null, 1));
 							}
 						}
 					})

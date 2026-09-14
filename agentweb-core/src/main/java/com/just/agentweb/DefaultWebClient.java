@@ -19,6 +19,7 @@ package com.just.agentweb;
 import android.annotation.TargetApi;
 import android.app.Activity;
 import android.content.ActivityNotFoundException;
+import android.content.ComponentName;
 import android.content.Intent;
 import android.content.pm.ActivityInfo;
 import android.content.pm.PackageManager;
@@ -131,10 +132,6 @@ public class DefaultWebClient extends MiddlewareWebClientBase {
 	 */
 	private WebView mWebView;
 	/**
-	 * 弹窗回调
-	 */
-	private Handler.Callback mCallback = null;
-	/**
 	 * MainFrameErrorMethod
 	 */
 	private Method onMainFrameErrorMethod = null;
@@ -213,7 +210,8 @@ public class DefaultWebClient extends MiddlewareWebClientBase {
 		}
 		// intent
 		if (url.startsWith(INTENT_SCHEME)) {
-			handleIntentUrl(url);
+			// 与其他 scheme 一样受 mUrlHandleWays 控制；WebView 无法加载 intent://，无论是否打开都拦截
+			handleDeepLink(url);
 			LogUtils.i(TAG, "intent url ");
 			return true;
 		}
@@ -332,7 +330,8 @@ public class DefaultWebClient extends MiddlewareWebClientBase {
 		}
 		//Intent scheme
 		if (url.startsWith(INTENT_SCHEME)) {
-			handleIntentUrl(url);
+			// 与其他 scheme 一样受 mUrlHandleWays 控制；WebView 无法加载 intent://，无论是否打开都拦截
+			handleDeepLink(url);
 			return true;
 		}
 		//微信支付
@@ -363,7 +362,7 @@ public class DefaultWebClient extends MiddlewareWebClientBase {
 			if (mWeakReference.get() == null) {
 				return 0;
 			}
-			Intent intent = Intent.parseUri(url, Intent.URI_INTENT_SCHEME);
+			Intent intent = parseUriSafely(mWeakReference.get(), url);
 			PackageManager mPackageManager = mWeakReference.get().getPackageManager();
 			List<ResolveInfo> mResolveInfos = mPackageManager.queryIntentActivities(intent, PackageManager.MATCH_DEFAULT_ONLY);
 			return mResolveInfos == null ? 0 : mResolveInfos.size();
@@ -375,22 +374,6 @@ public class DefaultWebClient extends MiddlewareWebClientBase {
 		}
 	}
 
-	private void handleIntentUrl(String intentUrl) {
-		try {
-			Intent intent = null;
-			if (TextUtils.isEmpty(intentUrl) || !intentUrl.startsWith(INTENT_SCHEME)) {
-				return;
-			}
-			if (lookup(intentUrl)) {
-				return;
-			}
-		} catch (Throwable e) {
-			if (LogUtils.isDebug()) {
-				e.printStackTrace();
-			}
-		}
-	}
-
 
 	private ResolveInfo lookupResolveInfo(String url) {
 		try {
@@ -399,16 +382,86 @@ public class DefaultWebClient extends MiddlewareWebClientBase {
 			if ((mActivity = mWeakReference.get()) == null) {
 				return null;
 			}
-			PackageManager packageManager = mActivity.getPackageManager();
-			intent = Intent.parseUri(url, Intent.URI_INTENT_SCHEME);
-			ResolveInfo info = packageManager.resolveActivity(intent, PackageManager.MATCH_DEFAULT_ONLY);
-			return info;
+			intent = parseUriSafely(mActivity, url);
+			return resolveAllowedActivity(mActivity, intent);
 		} catch (Throwable ignore) {
 			if (LogUtils.isDebug()) {
 				ignore.printStackTrace();
 			}
 		}
 		return null;
+	}
+
+	/**
+	 * 将网页传来的 URL 解析为 Intent，并去除网页不应控制的部分。
+	 * <p>
+	 * 该 Intent 以宿主 Activity 的身份启动，系统的导出检查按宿主 uid 判定；若原样启动，
+	 * 网页可通过 {@code #Intent;component=...;end} 拉起宿主自身未导出的组件、
+	 * 或借 grant flags 转授宿主 ContentProvider 的 URI 权限（Intent Redirection）。
+	 * <ul>
+	 *     <li>始终清除 selector、嵌套 Intent 与 URI 权限授予类 flags；</li>
+	 *     <li>指向宿主自身的 component 清除后按隐式匹配，只能命中宿主声明过 intent-filter 的页面；</li>
+	 *     <li>指向其他应用的 component 保留，由系统的导出检查兜底。</li>
+	 * </ul>
+	 * 宿主未导出页面的拦截见 {@link #resolveAllowedActivity(Activity, Intent)}。
+	 */
+	private static Intent parseUriSafely(Activity activity, String url) throws URISyntaxException {
+		Intent intent = Intent.parseUri(url, Intent.URI_INTENT_SCHEME);
+		intent.setSelector(null);
+		intent.removeExtra(Intent.EXTRA_INTENT);
+		int grantFlags = Intent.FLAG_GRANT_READ_URI_PERMISSION
+				| Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+				| Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION
+				| Intent.FLAG_GRANT_PREFIX_URI_PERMISSION;
+		intent.setFlags(intent.getFlags() & ~grantFlags);
+		ComponentName component = intent.getComponent();
+		if (component != null && activity.getPackageName().equals(component.getPackageName())) {
+			intent.setComponent(null);
+		}
+		return intent;
+	}
+
+	/**
+	 * 解析 Intent 的目标页面。若可能落到宿主自身未导出（exported=false）的页面，返回 null。
+	 * <p>
+	 * 网页能到达的宿主页面不应超出外部应用能到达的范围；exported=false 是开发者的安全决定，
+	 * 任何 {@link #mUrlHandleWays} 模式下都不放行，也不交由用户弹窗确认。
+	 */
+	private static ResolveInfo resolveAllowedActivity(Activity activity, Intent intent) {
+		PackageManager packageManager = activity.getPackageManager();
+		ResolveInfo info = packageManager.resolveActivity(intent, PackageManager.MATCH_DEFAULT_ONLY);
+		if (info == null) {
+			return null;
+		}
+		// 显式 component 只可能指向其他应用（宿主自身的已在 parseUriSafely 中清除）
+		if (intent.getComponent() == null && matchesUnexportedHostActivity(activity, intent)) {
+			LogUtils.i(TAG, "refuse to open unexported host activity:" + intent);
+			return null;
+		}
+		return info;
+	}
+
+	/**
+	 * 隐式 Intent 若匹配到多个页面，resolveActivity 返回的是选择器，用户仍可能选中宿主的未导出页面，
+	 * 因此需逐个检查宿主包内的匹配结果。查询限定在宿主自身包内，不涉及读取已安装应用列表（Issue #1078）。
+	 */
+	private static boolean matchesUnexportedHostActivity(Activity activity, Intent intent) {
+		String hostPackage = activity.getPackageName();
+		if (intent.getPackage() != null && !hostPackage.equals(intent.getPackage())) {
+			return false;
+		}
+		Intent probe = new Intent(intent);
+		probe.setPackage(hostPackage);
+		List<ResolveInfo> infos = activity.getPackageManager().queryIntentActivities(probe, PackageManager.MATCH_DEFAULT_ONLY);
+		if (infos == null) {
+			return false;
+		}
+		for (ResolveInfo resolveInfo : infos) {
+			if (resolveInfo.activityInfo != null && !resolveInfo.activityInfo.exported) {
+				return true;
+			}
+		}
+		return false;
 	}
 
 	private boolean lookup(String url) {
@@ -418,9 +471,8 @@ public class DefaultWebClient extends MiddlewareWebClientBase {
 			if ((mActivity = mWeakReference.get()) == null) {
 				return true;
 			}
-			PackageManager packageManager = mActivity.getPackageManager();
-			intent = Intent.parseUri(url, Intent.URI_INTENT_SCHEME);
-			ResolveInfo info = packageManager.resolveActivity(intent, PackageManager.MATCH_DEFAULT_ONLY);
+			intent = parseUriSafely(mActivity, url);
+			ResolveInfo info = resolveAllowedActivity(mActivity, intent);
 			// 跳到该应用
 			if (info != null) {
 				mActivity.startActivity(intent);
@@ -653,10 +705,8 @@ public class DefaultWebClient extends MiddlewareWebClientBase {
 	}
 
 	private Handler.Callback getCallback(final String url) {
-		if (this.mCallback != null) {
-			return this.mCallback;
-		}
-		return this.mCallback = new Handler.Callback() {
+		// 回调捕获了 url，不能缓存复用，否则后续弹窗确认打开的仍是第一次的链接
+		return new Handler.Callback() {
 			@Override
 			public boolean handleMessage(Message msg) {
 				switch (msg.what) {
